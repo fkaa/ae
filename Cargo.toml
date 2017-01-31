@@ -1,0 +1,8 @@
+[package]
+name = "ae"
+version = "0.1.0"
+authors = ["Felix Kaaman <trundmatu@gmail.com>"]
+
+[dependencies]
+byteorder = "*"
+inflate = "0.1"

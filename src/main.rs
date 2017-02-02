@@ -1,5 +1,6 @@
 extern crate inflate;
 extern crate byteorder;
+extern crate image;
 
 mod format;
 
@@ -9,6 +10,7 @@ use format::slp::SlpRasterizer;
 
 use std::io::{BufReader, Cursor, Write};
 use std::fs::File;
+use std::path::Path;
 
 fn datfile() {
     use inflate::InflateStream;
@@ -43,14 +45,40 @@ fn datfile() {
     //println!("{}", unsafe {::std::str::from_utf8_unchecked(&out) });
 }
 
-fn main() {
-    datfile();
+fn dump_slp(file: &Path, out: &Path) {
+    let mut reader = BufReader::new(File::open(file).unwrap());
 
+    let mut reader = slp::SlpReader::new(&mut reader).unwrap();
+    for i in 0..reader.len() {
+        let obj = reader.read_shape(i).unwrap();
+
+        let mut buf = vec![0u8; (obj.width * obj.height) as _];
+        let mut cur = Cursor::new(buf.into_boxed_slice());
+        slp::SlpDefaultRasterizer::rasterize(&mut cur, &obj);
+
+        use image::png::PNGEncoder;
+        use image::ColorType;
+
+        let outpath = out.join(Path::new(format!("{}-{}.png", file.file_name().unwrap().to_str().unwrap(), i).as_str()));
+        let mut outfile = File::create(outpath).unwrap();
+        PNGEncoder::new(outfile).encode(&cur.into_inner(), obj.width as _, obj.height as _, ColorType::Gray(8));
+
+    }
+}
+
+// 133 x 306
+
+fn main() {
+    dump_slp(Path::new("C:/Program Files (x86)/Steam/steamapps/common/Age2HD/resources/_common/drs/gamedata_x2/6249.slp"), Path::new("./dump/slp/"))
+    //datfile();
+
+/*
     let mut f = File::open("/Applications/Age of Empires II/Data/interfac.drs").unwrap();
     let mut reader = BufReader::new(f);
 
     let mut contents = drs::DrsReader::new(&mut reader).unwrap();
-    let file = contents.read_file(0, 53154).unwrap();
+    let (table, idx) = (1, 53154);
+    let file = contents.read_file(table, idx).unwrap();
 
     match file {
         drs::DrsFile::Slp(data) => {
@@ -62,11 +90,13 @@ fn main() {
             let mut cur = Cursor::new(buf.into_boxed_slice());
             slp::SlpDefaultRasterizer::rasterize(&mut cur, &slp);
 
-            use std::io::Write;
-            let mut f = File::create("foo.bin").unwrap();
-            f.write_all(&cur.into_inner());
+            use image::png::PNGEncoder;
+            use image::ColorType;
 
-            println!("{:?}", slp);
+            let mut f = File::create(format!("slp-{}-{}.png", table, idx)).unwrap();
+            PNGEncoder::new(f).encode(&cur.into_inner(), slp.width as _, slp.height as _, ColorType::Gray(8));
+
+//            println!("{:?}", slp);
         },
         drs::DrsFile::Bin(data) => {
 
@@ -78,6 +108,6 @@ fn main() {
 
         },
         a @ _ => {println!("{:?}", a);}
-    }
+    }*/
 
 }

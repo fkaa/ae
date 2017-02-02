@@ -26,15 +26,15 @@ pub struct SlpEntry {
 }
 
 pub trait SlpRasterizer {
-    fn rasterize<W: Write + Seek>(writer: &mut W, obj: &SlpObject)-> Result<(), ::std::io::Error>;
+    fn rasterize<W: Write + Seek>(writer: &mut W, obj: &SlpObject, pal: &Palette) -> Result<(), ::std::io::Error>;
 }
 
 pub struct SlpDefaultRasterizer {
 }
 
 impl SlpRasterizer for SlpDefaultRasterizer {
-    fn rasterize<W: Write + Seek>(writer: &mut W, obj: &SlpObject) -> Result<(), ::std::io::Error> {
-        #[inline]
+    fn rasterize<W: Write + Seek>(writer: &mut W, obj: &SlpObject, pal: &Palette) -> Result<(), ::std::io::Error> {
+        #[inline(always)]
         fn get_length<R: Read>(op: u8, reader: &mut R) -> u8 {
             let len = op >> 4;
             if len == 0u8 {
@@ -44,61 +44,75 @@ impl SlpRasterizer for SlpDefaultRasterizer {
             }
         }
 
-        #[inline]
-        fn draw_bytes<W: Write + Seek, R: Read>(writer: &mut W, reader: &mut R, count: u32) {
+        #[inline(always)]
+        fn draw_bytes<W: Write + Seek, R: Read>(writer: &mut W, reader: &mut R, count: u32, pal: &Palette) {
             for _ in 0..count {
-                let res = writer.write(&[reader.read_u8().unwrap()]);
+                let idx = pal.colors[reader.read_u8().unwrap() as usize];
+                let col = [idx.0, idx.1, idx.2, 0xffu8];
+
+                let res = writer.write(&col);
             }
         }
 
-        #[inline]
-        fn draw_byte<W: Write + Seek>(writer: &mut W, byte: u8, count: u8) {
+        #[inline(always)]
+        fn draw_byte<W: Write + Seek>(writer: &mut W, byte: u8, count: u8, pal: &Palette) {
+            let idx = pal.colors[byte as usize];
+            let col = [idx.0, idx.1, idx.2, 0xffu8];
+
             for _ in 0..count {
-                writer.write(&[byte]);
+                writer.write(&col);
             }
         }
 
         let mut reader = Cursor::new(&obj.instructions);
         let mut y = 0;
 
-        writer.seek(SeekFrom::Current(obj.skips[0].0 as _));
+        writer.seek(SeekFrom::Current(obj.skips[0].0 as i64 * 4));
 
         while let Ok(inst) = reader.read_u8() {
             let command = inst & 0x0f;
 
+            if y >= obj.height as _ {
+                break;
+            }
+
             match command {
                 0 | 4 | 8 | 0x0c => {
-                    draw_bytes(writer, &mut reader, (inst >> 2) as _);
+                    draw_bytes(writer, &mut reader, (inst >> 2) as _, &pal);
                 },
                 1 | 5 | 9 | 0x0d => {
-                    writer.seek(SeekFrom::Current((inst >> 2) as _));
+                    writer.seek(SeekFrom::Current((inst >> 2) as i64 * 4));
                 },
                 2 => {
                     let len = ((inst as u32 & 0xf0) << 4) + reader.read_u8().unwrap() as u32;
-                    draw_bytes(writer, &mut reader, len);
+                    draw_bytes(writer, &mut reader, len, &pal);
                 },
                 3 => {
                     let len = ((inst as u32 & 0xf0) << 4) + reader.read_u8().unwrap() as u32;
-                    writer.seek(SeekFrom::Current(len as _));
+                    writer.seek(SeekFrom::Current(len as i64 * 4));
                 },
                 6 => {
                     let len = get_length(inst, &mut reader);
-                    draw_bytes(writer, &mut reader, len as _);
+
+                    draw_bytes(writer, &mut reader, len as _, &pal);
                 },
                 7 => {
                     let len = get_length(inst, &mut reader);
                     let col = reader.read_u8().unwrap();
 
-                    draw_byte(writer, col, len);
+                    draw_byte(writer, col, len, &pal);
                 },
                 0x0a => {
                     let len = get_length(inst, &mut reader);
                     let col = reader.read_u8().unwrap();
-                    draw_byte(writer, col, len);
+
+                    draw_byte(writer, col, len, &pal);
                 },
                 0x0b => {
                     let len = get_length(inst, &mut reader);
-                    writer.seek(SeekFrom::Current(len as _));
+
+                    draw_byte(writer, 0x0, len, &pal);
+                    //writer.seek(SeekFrom::Current(len as _));
                 },
                 0x0e => {
                     match inst {
@@ -107,11 +121,11 @@ impl SlpRasterizer for SlpDefaultRasterizer {
                         0x2e | 0x3e => {
                         },
                         0x4e | 0x6e => {
-                            draw_byte(writer, 0xff, 1);
+                            draw_byte(writer, 0xff, 1, &pal);
                         },
                         0x5e | 0x7e => {
                             let len = reader.read_u8().unwrap();
-                            draw_byte(writer, 0xff, len);
+                            draw_byte(writer, 0xff, len, &pal);
                         },
                         _ => {
                             println!("unknown extended 0x{:X}", inst);
@@ -123,9 +137,9 @@ impl SlpRasterizer for SlpDefaultRasterizer {
                     //println!("End of line ({})", y);
 
                     if y < (obj.height - 1) as _ {
-                        writer.seek(SeekFrom::Current((obj.skips[y].1 + obj.skips[y + 1].0) as _));
+                        writer.seek(SeekFrom::Current((obj.skips[y].1 + obj.skips[y + 1].0) as i64 * 4));
                     } else {
-                        writer.seek(SeekFrom::Current((obj.skips[y].1) as _ ));
+                        writer.seek(SeekFrom::Current((obj.skips[y].1) as i64 * 4));
                     }
                     y += 1;
                 }
@@ -174,6 +188,7 @@ impl<R: Read + Seek> SlpReader<R> {
     pub fn read_shape(&mut self, index: usize) -> Result<SlpObject, ::std::io::Error> {
         let entry = self.entries[index];
 
+        let end = try!(self.reader.seek(SeekFrom::End(0)));
         try!(self.reader.seek(SeekFrom::Start(entry.outline_offset as _)));
 
         let mut skips = Vec::new();
@@ -189,13 +204,19 @@ impl<R: Read + Seek> SlpReader<R> {
             offsets.push(try!(self.reader.read_u32::<LittleEndian>()));
         }
 
-        println!("{:?}..{:?}", offsets[0], offsets[offsets.len() - 1]);
-        println!("{:?}..{:?}", offsets[0], entry.data_end);
+        //println!("{:?}..{:?}", offsets[0], offsets[offsets.len() - 1]);
+        //println!("{:?}..{:?}", offsets[0], end);
 
         let mut instructions = {
-            let mut vec = Vec::with_capacity((entry.data_end - offsets[0]) as _);
+            let end = if entry.data_end == 0 {
+                end as _
+            } else {
+                entry.data_end
+            };
+
+            let mut vec = Vec::with_capacity((end - offsets[0]) as _);
             unsafe {
-                vec.set_len((entry.data_end - offsets[0]) as _);
+                vec.set_len((end - offsets[0]) as _);
             }
             try!(self.reader.read_exact(&mut vec));
             vec.into_boxed_slice()
